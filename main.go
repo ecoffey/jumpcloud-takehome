@@ -1,44 +1,80 @@
 package main
 
 import (
+	"crypto/sha512"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 )
 
-type CommandType int
+type ReserveIdCmd struct {
+	plaintext string
+	hashDelay time.Duration
+	resp      chan int
+}
 
-const (
-	AddHash = iota
-)
+type StoreHashCmd struct {
+	id   int
+	hash string
+}
 
-type CmdRequest struct {
-	commandType CommandType
-	replyChan   chan int
+type RetrieveHashCmd struct {
+	id   int
+	resp chan string
 }
 
 type HashesStore struct {
-	id int
+	id       int
+	idToHash map[int]string
 }
 type Server struct {
-	cmds chan<- CmdRequest
+	cmds      chan<- interface{}
+	hashDelay time.Duration
 }
 
-func startHashesStoreManager() chan<- CmdRequest {
-	store := HashesStore{id: 1}
+func hashEncode(plaintext string) string {
+	hasher := sha512.New()
+	hasher.Write([]byte(plaintext))
+	return base64.StdEncoding.EncodeToString(hasher.Sum(nil))
+}
 
-	cmds := make(chan CmdRequest)
+func startHashesStoreManager() chan<- interface{} {
+	store := HashesStore{id: 1, idToHash: make(map[int]string)}
+
+	cmds := make(chan interface{})
 
 	go func() {
 		for cmd := range cmds {
-			switch cmd.commandType {
-			case AddHash:
-				cmd.replyChan <- store.id
+			switch cmd.(type) {
+			case ReserveIdCmd:
+				reservedIdCmd := cmd.(ReserveIdCmd)
+				id := store.id
+				reservedIdCmd.resp <- id
 				store.id += 1
+				if reservedIdCmd.hashDelay > 0 {
+					go func() {
+						<-time.Tick(reservedIdCmd.hashDelay)
+						hash := hashEncode(reservedIdCmd.plaintext)
+						cmds <- StoreHashCmd{id: id, hash: hash}
+					}()
+				} else {
+					hash := hashEncode(reservedIdCmd.plaintext)
+					store.idToHash[id] = hash
+				}
+			case StoreHashCmd:
+				addHashCmd := cmd.(StoreHashCmd)
+				store.idToHash[addHashCmd.id] = addHashCmd.hash
+			case RetrieveHashCmd:
+				retrieveHashCmd := cmd.(RetrieveHashCmd)
+				retrieveHashCmd.resp <- store.idToHash[retrieveHashCmd.id]
 			default:
-				log.Fatalln("unknown command type", cmd.commandType)
+				log.Fatalln("unknown command type")
 			}
 		}
 	}()
@@ -46,23 +82,54 @@ func startHashesStoreManager() chan<- CmdRequest {
 	return cmds
 }
 
-func (s *Server) addHash(w http.ResponseWriter, _ *http.Request) {
-	replyChan := make(chan int)
-	s.cmds <- CmdRequest{commandType: AddHash, replyChan: replyChan}
+func (s *Server) hashEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		if r.ParseForm() != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
 
-	id := <-replyChan
-	fmt.Fprintf(w, "%d\n", id)
+		resp := make(chan int)
+		s.cmds <- ReserveIdCmd{
+			plaintext: r.Form.Get("password"),
+			hashDelay: s.hashDelay,
+			resp:      resp,
+		}
+		id := <-resp
+		fmt.Fprintf(w, "%d", id)
+	} else if r.Method == http.MethodGet {
+		idStr := strings.TrimPrefix(r.URL.Path, "/hash/")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+
+		resp := make(chan string)
+		s.cmds <- RetrieveHashCmd{id: id, resp: resp}
+		hash := <-resp
+		fmt.Fprintf(w, "%s", hash)
+	} else {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
-func main() {
-	cmds := startHashesStoreManager()
-	server := Server{cmds: cmds}
+func router(hashDelay time.Duration) http.Handler {
+	server := Server{
+		cmds:      startHashesStoreManager(),
+		hashDelay: hashDelay,
+	}
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/", server.addHash)
+	mux.HandleFunc("/hash", server.hashEndpoint)
+	mux.HandleFunc("/hash/", server.hashEndpoint)
 
-	err := http.ListenAndServe(":3333", mux)
+	return mux
+}
+
+func main() {
+	err := http.ListenAndServe(":3333", router(5*time.Second))
 
 	if errors.Is(err, http.ErrServerClosed) {
 		fmt.Printf("server closed\n")
