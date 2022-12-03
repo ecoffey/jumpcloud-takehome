@@ -25,7 +25,7 @@ type HashCmdRetrieve struct {
 
 type HashCmdGracefulShutdown struct{}
 
-type HashStore struct {
+type hashStore struct {
 	cmds               chan interface{} // the command queue used to send commands to the store
 	currentId          int              // the current id to be sent back to HashCmdReserveId.Resp
 	idToHash           map[int]string   // the mapping from id to hash for retrieval
@@ -51,7 +51,7 @@ type HashStore struct {
 // do not have to specify time.Sleep() calls.
 func StartHashLoop(shutdown chan int, hashDelay time.Duration) chan<- interface{} {
 
-	hs := HashStore{
+	s := hashStore{
 		// specify a buffered channel, so that we can concurrently
 		// process requests
 		cmds:               make(chan interface{}, 100),
@@ -64,41 +64,41 @@ func StartHashLoop(shutdown chan int, hashDelay time.Duration) chan<- interface{
 	}
 
 	go func() {
-		for cmd := range hs.cmds {
+		for cmd := range s.cmds {
 			switch cmd.(type) {
 			case HashCmdReserveId:
-				hs.processReserveCmd(cmd.(HashCmdReserveId))
+				s.processReserveCmd(cmd.(HashCmdReserveId))
 			case hashCmdStore:
-				hs.processStoreCmd(cmd.(hashCmdStore))
+				s.processStoreCmd(cmd.(hashCmdStore))
 			case HashCmdRetrieve:
-				hs.processRetrieveCmd(cmd.(HashCmdRetrieve))
+				s.processRetrieveCmd(cmd.(HashCmdRetrieve))
 			case HashCmdGracefulShutdown:
-				hs.processGracefulShutdownCmd(cmd.(HashCmdGracefulShutdown))
+				s.processGracefulShutdownCmd(cmd.(HashCmdGracefulShutdown))
 			default:
 				log.Fatalln("unknown command type")
 			}
 		}
 	}()
 
-	return hs.cmds
+	return s.cmds
 }
 
-func (hs *HashStore) processReserveCmd(cmd HashCmdReserveId) {
-	if hs.acceptingNewHashes {
-		id := hs.currentId
+func (s *hashStore) processReserveCmd(cmd HashCmdReserveId) {
+	if s.acceptingNewHashes {
+		id := s.currentId
 		cmd.Resp <- id
-		hs.currentId += 1
-		hs.inFlight++
-		if hs.hashDelay > 0 {
+		s.currentId += 1
+		s.inFlight++
+		if s.hashDelay > 0 {
 			go func() {
-				<-time.Tick(hs.hashDelay)
-				hs.cmds <- hashCmdStore{
+				<-time.Tick(s.hashDelay)
+				s.cmds <- hashCmdStore{
 					id:   id,
 					hash: hashEncode(cmd.Plaintext),
 				}
 			}()
 		} else {
-			hs.processStoreCmd(hashCmdStore{
+			s.processStoreCmd(hashCmdStore{
 				id:   id,
 				hash: hashEncode(cmd.Plaintext),
 			})
@@ -108,26 +108,26 @@ func (hs *HashStore) processReserveCmd(cmd HashCmdReserveId) {
 	}
 }
 
-func (hs *HashStore) processStoreCmd(cmd hashCmdStore) {
-	hs.idToHash[cmd.id] = cmd.hash
-	hs.inFlight--
-	if !hs.acceptingNewHashes && hs.inFlight == 0 {
+func (s *hashStore) processStoreCmd(cmd hashCmdStore) {
+	s.idToHash[cmd.id] = cmd.hash
+	s.inFlight--
+	if !s.acceptingNewHashes && s.inFlight == 0 {
 		// if this was the last hash we were waiting for, then we're
 		// done and can signal the shutdown channel.
-		hs.shutdown <- 1
+		s.shutdown <- 1
 	}
 }
 
-func (hs *HashStore) processRetrieveCmd(cmd HashCmdRetrieve) {
-	cmd.Resp <- hs.idToHash[cmd.Id]
+func (s *hashStore) processRetrieveCmd(cmd HashCmdRetrieve) {
+	cmd.Resp <- s.idToHash[cmd.Id]
 }
 
-func (hs *HashStore) processGracefulShutdownCmd(cmd HashCmdGracefulShutdown) {
-	hs.acceptingNewHashes = false
-	if hs.inFlight == 0 {
+func (s *hashStore) processGracefulShutdownCmd(cmd HashCmdGracefulShutdown) {
+	s.acceptingNewHashes = false
+	if s.inFlight == 0 {
 		// If we're asked to shut down with nothing in flight, then
 		// we can safely & immediately signal shutdown
-		hs.shutdown <- 1
+		s.shutdown <- 1
 	}
 }
 

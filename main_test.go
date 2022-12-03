@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"eoinisawesome.com/jumpcloud-takehome/hashes"
+	"eoinisawesome.com/jumpcloud-takehome/stats"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -103,7 +104,7 @@ func TestHashEndpoint(t *testing.T) {
 			t.Errorf("Unable to read from getResp body %s", err)
 		}
 
-		var statsJson StatsJson
+		var statsJson stats.StatsJson
 		err = json.Unmarshal(getBodyBytes, &statsJson)
 		if err != nil {
 			t.Errorf("Unable to unmarshal into StatsJson %s", err)

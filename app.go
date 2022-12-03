@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"eoinisawesome.com/jumpcloud-takehome/hashes"
+	"eoinisawesome.com/jumpcloud-takehome/stats"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -21,7 +22,7 @@ func (s *App) hashEndpoint(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			end := time.Now()
 			go func() {
-				s.statCmds <- StatCmdRecordRequest{latency: end.Sub(start)}
+				s.statCmds <- stats.StatCmdRecordRequest{Latency: end.Sub(start)}
 			}()
 		}()
 
@@ -60,13 +61,13 @@ func (s *App) statsEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := make(chan int64)
-	s.statCmds <- StatCmdRetrieve{resp: resp}
+	s.statCmds <- stats.StatCmdRetrieve{Resp: resp}
 	totalRequests := <-resp
 	totalLatency := <-resp
 
-	var jsonStruct = StatsJson{}
+	var jsonStruct = stats.StatsJson{}
 	if totalRequests > 0 {
-		jsonStruct = StatsJson{
+		jsonStruct = stats.StatsJson{
 			Total:   totalRequests,
 			Average: totalLatency / totalRequests,
 		}
@@ -88,7 +89,7 @@ func (s *App) shutdownEndpoint(w http.ResponseWriter, r *http.Request) {
 func router(shutdown chan int, hashDelay time.Duration) http.Handler {
 	server := App{
 		hashCmds: hashes.StartHashLoop(shutdown, hashDelay),
-		statCmds: startStatsLoop(),
+		statCmds: stats.StartStatsLoop(),
 	}
 
 	mux := http.NewServeMux()
