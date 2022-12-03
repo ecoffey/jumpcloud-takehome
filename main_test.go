@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,13 +33,13 @@ func assertAddHashReturnsId(t *testing.T, server *Server, expectedId int) {
 
 func TestHashEndpoint(t *testing.T) {
 	t.Run("first id returned should be 1", func(t *testing.T) {
-		server := Server{cmds: startHashesStoreManager()}
+		server := Server{hashCmds: startHashLoop()}
 
 		assertAddHashReturnsId(t, &server, 1)
 	})
 
 	t.Run("serial calls should return increasing ids", func(t *testing.T) {
-		server := Server{cmds: startHashesStoreManager()}
+		server := Server{hashCmds: startHashLoop()}
 
 		assertAddHashReturnsId(t, &server, 1)
 		assertAddHashReturnsId(t, &server, 2)
@@ -83,6 +84,32 @@ func TestHashEndpoint(t *testing.T) {
 
 		if getBodyStr != "ZEHhWB65gUlzdVwtDQArEyx+KVLzp/aTaRaPlBzYRIFj6vjFdqEb0Q5B8zVKCZ0vKbZPZklJz0Fd7su2A+gf7Q==" {
 			t.Errorf("Did not return expected body, got %s", getBodyStr)
+		}
+	})
+
+	t.Run("stats return 0 if no requests", func(t *testing.T) {
+		httpServer := httptest.NewServer(router(0))
+		defer httpServer.Close()
+
+		getResp, err := http.Get(httpServer.URL + "/stats")
+		if err != nil {
+			t.Errorf("Unable to make GET call %s", err)
+		}
+		defer getResp.Body.Close()
+
+		getBodyBytes, err := io.ReadAll(getResp.Body)
+		if err != nil {
+			t.Errorf("Unable to read from getResp body %s", err)
+		}
+
+		var statsJson StatsJson
+		err = json.Unmarshal(getBodyBytes, &statsJson)
+		if err != nil {
+			t.Errorf("Unable to unmarshal into StatsJson %s", err)
+		}
+
+		if statsJson.Total != 0 || statsJson.Average != 0 {
+			t.Errorf("Stats should have been 0")
 		}
 	})
 }

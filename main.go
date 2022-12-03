@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha512"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -29,12 +30,27 @@ type RetrieveHashCmd struct {
 	resp chan string
 }
 
+type RecordRequestCmd struct {
+	latency time.Duration
+}
+
+type RetrieveStatsCmd struct {
+	resp chan int64
+}
+
 type HashesStore struct {
 	id       int
 	idToHash map[int]string
 }
+
+type StatsStore struct {
+	count        int64
+	totalLatency time.Duration
+}
+
 type Server struct {
-	cmds      chan<- interface{}
+	hashCmds  chan<- interface{}
+	statsCmds chan<- interface{}
 	hashDelay time.Duration
 }
 
@@ -44,8 +60,11 @@ func hashEncode(plaintext string) string {
 	return base64.StdEncoding.EncodeToString(hasher.Sum(nil))
 }
 
-func startHashesStoreManager() chan<- interface{} {
-	store := HashesStore{id: 1, idToHash: make(map[int]string)}
+func startHashLoop() chan<- interface{} {
+	hashStore := HashesStore{
+		id:       1,
+		idToHash: make(map[int]string),
+	}
 
 	cmds := make(chan interface{})
 
@@ -54,9 +73,9 @@ func startHashesStoreManager() chan<- interface{} {
 			switch cmd.(type) {
 			case ReserveIdCmd:
 				reservedIdCmd := cmd.(ReserveIdCmd)
-				id := store.id
+				id := hashStore.id
 				reservedIdCmd.resp <- id
-				store.id += 1
+				hashStore.id += 1
 				if reservedIdCmd.hashDelay > 0 {
 					go func() {
 						<-time.Tick(reservedIdCmd.hashDelay)
@@ -65,14 +84,15 @@ func startHashesStoreManager() chan<- interface{} {
 					}()
 				} else {
 					hash := hashEncode(reservedIdCmd.plaintext)
-					store.idToHash[id] = hash
+					hashStore.idToHash[id] = hash
 				}
 			case StoreHashCmd:
 				addHashCmd := cmd.(StoreHashCmd)
-				store.idToHash[addHashCmd.id] = addHashCmd.hash
+				hashStore.idToHash[addHashCmd.id] = addHashCmd.hash
 			case RetrieveHashCmd:
 				retrieveHashCmd := cmd.(RetrieveHashCmd)
-				retrieveHashCmd.resp <- store.idToHash[retrieveHashCmd.id]
+				retrieveHashCmd.resp <- hashStore.idToHash[retrieveHashCmd.id]
+
 			default:
 				log.Fatalln("unknown command type")
 			}
@@ -82,7 +102,35 @@ func startHashesStoreManager() chan<- interface{} {
 	return cmds
 }
 
+func startStatsLoop() chan<- interface{} {
+	statsStore := StatsStore{
+		count:        0,
+		totalLatency: 0,
+	}
+
+	cmds := make(chan interface{})
+
+	go func() {
+		for cmd := range cmds {
+			switch cmd.(type) {
+			case RecordRequestCmd:
+				statsStore.count++
+				statsStore.totalLatency += cmd.(RecordRequestCmd).latency
+			case RetrieveStatsCmd:
+				resp := cmd.(RetrieveStatsCmd).resp
+				resp <- statsStore.count
+				resp <- statsStore.totalLatency.Microseconds()
+			default:
+				// TODO log
+			}
+		}
+	}()
+
+	return cmds
+}
+
 func (s *Server) hashEndpoint(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	if r.Method == http.MethodPost {
 		if r.ParseForm() != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -90,7 +138,7 @@ func (s *Server) hashEndpoint(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp := make(chan int)
-		s.cmds <- ReserveIdCmd{
+		s.hashCmds <- ReserveIdCmd{
 			plaintext: r.Form.Get("password"),
 			hashDelay: s.hashDelay,
 			resp:      resp,
@@ -106,17 +154,59 @@ func (s *Server) hashEndpoint(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp := make(chan string)
-		s.cmds <- RetrieveHashCmd{id: id, resp: resp}
+		s.hashCmds <- RetrieveHashCmd{id: id, resp: resp}
 		hash := <-resp
 		fmt.Fprintf(w, "%s", hash)
 	} else {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+	end := time.Now()
+	go func() {
+		s.statsCmds <- RecordRequestCmd{latency: end.Sub(start)}
+	}()
+}
+
+type StatsJson struct {
+	Total   int64 `json:"total"`
+	Average int64 `json:"average"`
+}
+
+func (s *Server) statsEndpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	resp := make(chan int64)
+	s.statsCmds <- RetrieveStatsCmd{resp: resp}
+	totalRequests := <-resp
+	totalLatency := <-resp
+
+	var jsonStruct StatsJson
+	if totalRequests > 0 {
+		jsonStruct = StatsJson{
+			Total:   totalRequests,
+			Average: totalLatency / totalRequests,
+		}
+	} else {
+		jsonStruct = StatsJson{
+			Total:   0,
+			Average: 0,
+		}
+	}
+
+	jsonBytes, err := json.Marshal(jsonStruct)
+	if err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Fprint(w, string(jsonBytes))
 }
 
 func router(hashDelay time.Duration) http.Handler {
 	server := Server{
-		cmds:      startHashesStoreManager(),
+		hashCmds:  startHashLoop(),
+		statsCmds: startStatsLoop(),
 		hashDelay: hashDelay,
 	}
 
@@ -124,6 +214,7 @@ func router(hashDelay time.Duration) http.Handler {
 
 	mux.HandleFunc("/hash", server.hashEndpoint)
 	mux.HandleFunc("/hash/", server.hashEndpoint)
+	mux.HandleFunc("/stats", server.statsEndpoint)
 
 	return mux
 }
