@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"eoinisawesome.com/jumpcloud-takehome/hashes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,7 @@ import (
 	"testing"
 )
 
-func assertAddHashReturnsId(t *testing.T, server *Server, expectedId int) {
+func assertAddHashReturnsId(t *testing.T, server *App, expectedId int) {
 	request := httptest.NewRequest(http.MethodPost, "/hash", nil)
 	responseRecorder := httptest.NewRecorder()
 
@@ -24,7 +25,7 @@ func assertAddHashReturnsId(t *testing.T, server *Server, expectedId int) {
 
 	id, err := strconv.Atoi(strings.TrimSpace(bodyString))
 	if err != nil {
-		t.Errorf("Could not parse response body to id: %s", err)
+		t.Errorf("Could not parse response body to currentId: %s", err)
 	}
 	if id != expectedId {
 		t.Errorf("Did not return %d", expectedId)
@@ -32,14 +33,14 @@ func assertAddHashReturnsId(t *testing.T, server *Server, expectedId int) {
 }
 
 func TestHashEndpoint(t *testing.T) {
-	t.Run("first id returned should be 1", func(t *testing.T) {
-		server := Server{hashCmds: startHashLoop(make(chan int))}
+	t.Run("first currentId returned should be 1", func(t *testing.T) {
+		server := App{hashCmds: hashes.StartHashLoop(make(chan int), 0)}
 
 		assertAddHashReturnsId(t, &server, 1)
 	})
 
 	t.Run("serial calls should return increasing ids", func(t *testing.T) {
-		server := Server{hashCmds: startHashLoop(make(chan int))}
+		server := App{hashCmds: hashes.StartHashLoop(make(chan int), 0)}
 
 		assertAddHashReturnsId(t, &server, 1)
 		assertAddHashReturnsId(t, &server, 2)
@@ -65,7 +66,7 @@ func TestHashEndpoint(t *testing.T) {
 
 		id, err := strconv.Atoi(strings.TrimSpace(postBodyStr))
 		if err != nil {
-			t.Errorf("Could not parse postResp body to id: %s", err)
+			t.Errorf("Could not parse postResp body to currentId: %s", err)
 		}
 		if id != 1 {
 			t.Errorf("Did not return %d", 1)
