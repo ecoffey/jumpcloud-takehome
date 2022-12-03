@@ -6,6 +6,7 @@ import (
 	"eoinisawesome.com/jumpcloud-takehome/middleware"
 	"eoinisawesome.com/jumpcloud-takehome/stats"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,42 +14,91 @@ import (
 )
 
 type App struct {
-	HashCmds chan interface{}
-	StatCmds chan interface{}
+	hashCmds chan interface{}
+	statCmds chan interface{}
 }
 
-func (a *App) PostHashEndpoint(w http.ResponseWriter, r *http.Request) {
+func AppRouter(shutdown chan int, hashDelay time.Duration) http.Handler {
+	app := App{
+		hashCmds: hashes.StartHashLoop(shutdown, hashDelay),
+		statCmds: stats.StartStatsLoop(),
+	}
+
+	mux := http.NewServeMux()
+
+	mux.Handle(
+		"/hash",
+		middleware.AccessLogging(
+			app.appStatsFilter( // stats collection is first to cover the case of bad method, or bad form data
+				middleware.AllowedMethodFilter(http.MethodPost,
+					middleware.ParseFormFilter(
+						http.HandlerFunc(app.postHashEndpoint))))))
+	mux.Handle("/hash/",
+		middleware.AccessLogging(
+			middleware.AllowedMethodFilter(http.MethodGet,
+				http.HandlerFunc(app.getHashEndpoint))))
+
+	mux.Handle("/stats",
+		middleware.AccessLogging(
+			middleware.AllowedMethodFilter(http.MethodGet,
+				http.HandlerFunc(app.getStatsEndpoint))))
+
+	mux.Handle("/shutdown",
+		middleware.AccessLogging(
+			middleware.AllowedMethodFilter(http.MethodPost,
+				http.HandlerFunc(app.postShutdownEndpoint))))
+
+	return mux
+}
+
+func (a *App) postHashEndpoint(w http.ResponseWriter, r *http.Request) {
+	plaintext := r.Form.Get("password")
+
+	// Only use TrimSpace for detecting the empty string. Users should be
+	// allowed to hash/encode a password with leading/trailing spaces
+	// if they want to.
+	if strings.TrimSpace(plaintext) == "" {
+		log.Printf("password value in POST body is empty")
+		http.Error(w, "Form variable password can not be empty", http.StatusBadRequest)
+		return
+	}
+
 	resp := make(chan int)
-	a.HashCmds <- hashes.HashCmdReserveId{
-		Plaintext: r.Form.Get("password"),
+	a.hashCmds <- hashes.HashCmdReserveId{
+		Plaintext: plaintext,
 		Resp:      resp,
 	}
+
 	id := <-resp
-	if id > 0 {
-		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, "%d", id)
-	} else {
+	if id <= 0 {
+		log.Printf("rejected POST /hash because server is waiting to shutdown")
 		http.Error(w, "Server Closing", http.StatusBadRequest)
+		return
 	}
+
+	w.WriteHeader(http.StatusCreated)
+	writeBody(w, id)
 }
 
-func (a *App) GetHashEndpoint(w http.ResponseWriter, r *http.Request) {
+func (a *App) getHashEndpoint(w http.ResponseWriter, r *http.Request) {
 	idStr := strings.TrimPrefix(r.URL.Path, "/hash/")
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
+		log.Printf("Unable to parse %s to int: %s", idStr, err)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	resp := make(chan string)
-	a.HashCmds <- hashes.HashCmdRetrieve{Id: id, Resp: resp}
+	a.hashCmds <- hashes.HashCmdRetrieve{Id: id, Resp: resp}
 	hash := <-resp
-	fmt.Fprintf(w, "%s", hash)
+
+	writeBody(w, hash)
 }
 
-func (a *App) GetStatsEndpoint(w http.ResponseWriter, r *http.Request) {
+func (a *App) getStatsEndpoint(w http.ResponseWriter, _ *http.Request) {
 	resp := make(chan int64)
-	a.StatCmds <- stats.StatCmdRetrieve{Resp: resp}
+	a.statCmds <- stats.StatCmdRetrieve{Resp: resp}
 	totalRequests := <-resp
 	totalLatency := <-resp
 
@@ -62,56 +112,36 @@ func (a *App) GetStatsEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	jsonBytes, err := json.Marshal(jsonStruct)
 	if err != nil {
+		log.Printf("Unable to serialze StatsJson %s to bytes: %s", jsonStruct, err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	fmt.Fprint(w, string(jsonBytes))
+	writeBody(w, string(jsonBytes))
 }
 
 func (a *App) postShutdownEndpoint(_ http.ResponseWriter, _ *http.Request) {
-	a.HashCmds <- hashes.HashCmdGracefulShutdown{}
+	a.hashCmds <- hashes.HashCmdGracefulShutdown{}
 }
 
-func (a *App) AppStatsFilter(next http.Handler) http.Handler {
+func (a *App) appStatsFilter(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		// run the metrics collection in a go routine so that we don't
-		// block returning the response
+		// block returning the response.
 		go func() {
-			a.StatCmds <- stats.StatCmdRecordRequest{
+			a.statCmds <- stats.StatCmdRecordRequest{
 				Latency: time.Now().Sub(start),
 			}
 		}()
 	})
 }
 
-func Router(shutdown chan int, hashDelay time.Duration) http.Handler {
-	app := App{
-		HashCmds: hashes.StartHashLoop(shutdown, hashDelay),
-		StatCmds: stats.StartStatsLoop(),
+func writeBody(w http.ResponseWriter, obj any) {
+	_, err := fmt.Fprint(w, obj)
+	if err != nil {
+		log.Printf("Unable to write %s to body: %s", obj, err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
-
-	mux := http.NewServeMux()
-
-	mux.Handle(
-		"/hash",
-		app.AppStatsFilter( // stats collection is first to cover the case of bad method, or bad form data
-			middleware.AllowedMethodFilter(http.MethodPost,
-				middleware.ParseFormFilter(
-					http.HandlerFunc(app.PostHashEndpoint)))))
-	mux.Handle("/hash/",
-		middleware.AllowedMethodFilter(http.MethodGet,
-			http.HandlerFunc(app.GetHashEndpoint)))
-
-	mux.Handle("/stats",
-		middleware.AllowedMethodFilter(http.MethodGet,
-			http.HandlerFunc(app.GetStatsEndpoint)))
-
-	mux.Handle("/shutdown",
-		middleware.AllowedMethodFilter(http.MethodPost,
-			http.HandlerFunc(app.postShutdownEndpoint)))
-
-	return mux
 }

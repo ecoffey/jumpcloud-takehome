@@ -38,11 +38,13 @@ func StartStatsLoop() chan interface{} {
 		for cmd := range cmds {
 			switch cmd.(type) {
 			case StatCmdRecordRequest:
+				log.Println("processing StatCmdRecordRequest...")
 				s.processRecordCmd(cmd.(StatCmdRecordRequest))
 			case StatCmdRetrieve:
+				log.Println("processing StatCmdRetrieve...")
 				s.processRetrieveCmd(cmd.(StatCmdRetrieve))
 			default:
-				log.Fatalln("unknown command type")
+				log.Fatalln("unknown command type", cmd)
 			}
 		}
 	}()

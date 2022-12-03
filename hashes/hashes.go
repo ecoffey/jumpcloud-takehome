@@ -32,14 +32,14 @@ type hashStore struct {
 	hashDelay          time.Duration    // delay to wait during HashCmdReserveId before issuing a HashCmdStore
 	inFlight           int              // the number of hashes waiting to be added to the store
 	acceptingNewHashes bool             // if true the HashCmdReserveId will return currentId and schedule a store
-	shutdown           chan int         // channel to signal when inFlight == 0 and no new hashes are being accepted
+	shutdownChannel    chan int         // channel to signal when inFlight == 0 and no new hashes are being accepted
 }
 
 // StartHashLoop builds and returns a channel of empty interface, where
 // the intention is to feed that channel the HashCmd* types, and begins
 // consuming from it in a go routine.
 //
-// shutdown: a channel to signal that we have been asked to shut down and
+// shutdownChannel: a channel to signal that we have been asked to shut down and
 // are done processing in-flight hashes.
 //
 // hashDelay: a Duration to wait before storing the hash in the hash store.
@@ -60,22 +60,26 @@ func StartHashLoop(shutdown chan int, hashDelay time.Duration) chan interface{} 
 		hashDelay:          hashDelay,
 		inFlight:           0,
 		acceptingNewHashes: true,
-		shutdown:           shutdown,
+		shutdownChannel:    shutdown,
 	}
 
 	go func() {
 		for cmd := range s.cmds {
 			switch cmd.(type) {
 			case HashCmdReserveId:
+				log.Println("processing HashCmdReserveId...")
 				s.processReserveCmd(cmd.(HashCmdReserveId))
 			case hashCmdStore:
+				log.Println("processing hashCmdStore...")
 				s.processStoreCmd(cmd.(hashCmdStore))
 			case HashCmdRetrieve:
+				log.Println("processing HashCmdRetrieve...")
 				s.processRetrieveCmd(cmd.(HashCmdRetrieve))
 			case HashCmdGracefulShutdown:
-				s.processGracefulShutdownCmd(cmd.(HashCmdGracefulShutdown))
+				log.Println("processing HashCmdGracefulShutdown...")
+				s.processGracefulShutdownCmd()
 			default:
-				log.Fatalln("unknown command type")
+				log.Fatalln("unknown command type", cmd)
 			}
 		}
 	}()
@@ -111,23 +115,24 @@ func (s *hashStore) processReserveCmd(cmd HashCmdReserveId) {
 func (s *hashStore) processStoreCmd(cmd hashCmdStore) {
 	s.idToHash[cmd.id] = cmd.hash
 	s.inFlight--
-	if !s.acceptingNewHashes && s.inFlight == 0 {
-		// if this was the last hash we were waiting for, then we're
-		// done and can signal the shutdown channel.
-		s.shutdown <- 1
-	}
+	s.handleShutdown()
 }
 
 func (s *hashStore) processRetrieveCmd(cmd HashCmdRetrieve) {
 	cmd.Resp <- s.idToHash[cmd.Id]
 }
 
-func (s *hashStore) processGracefulShutdownCmd(cmd HashCmdGracefulShutdown) {
+func (s *hashStore) processGracefulShutdownCmd() {
 	s.acceptingNewHashes = false
-	if s.inFlight == 0 {
-		// If we're asked to shut down with nothing in flight, then
-		// we can safely & immediately signal shutdown
-		s.shutdown <- 1
+	s.handleShutdown()
+}
+
+func (s *hashStore) handleShutdown() {
+	if !s.acceptingNewHashes && s.inFlight == 0 {
+		// if this was the last hash we were waiting for, then we're
+		// done and can signal the shutdownChannel channel.
+		log.Println("signalling shutdownChannel")
+		s.shutdownChannel <- 1
 	}
 }
 

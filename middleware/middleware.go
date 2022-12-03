@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log"
 	"net/http"
 )
 
@@ -21,6 +22,13 @@ func ParseFormFilter(next http.Handler) http.Handler {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func AccessLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Print("processing request path ", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
