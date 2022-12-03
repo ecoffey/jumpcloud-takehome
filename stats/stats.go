@@ -11,15 +11,15 @@ type StatsJson struct {
 }
 
 type StatCmdRecordRequest struct {
-	Latency time.Duration
+	Latency time.Duration // how long the request took
 }
 
 type StatCmdRetrieve struct {
-	Resp chan int64
+	Resp chan int64 // channel to receive both the total # of requests, and the total duration of all requests
 }
 
 type statsStore struct {
-	count        int64
+	totalCount   int64
 	totalLatency time.Duration
 }
 
@@ -28,7 +28,7 @@ type statsStore struct {
 // it in a go routine.
 func StartStatsLoop() chan interface{} {
 	s := statsStore{
-		count:        0,
+		totalCount:   0,
 		totalLatency: 0,
 	}
 
@@ -51,11 +51,11 @@ func StartStatsLoop() chan interface{} {
 }
 
 func (s *statsStore) processRecordCmd(cmd StatCmdRecordRequest) {
-	s.count++
+	s.totalCount++
 	s.totalLatency += cmd.Latency
 }
 
 func (s *statsStore) processRetrieveCmd(cmd StatCmdRetrieve) {
-	cmd.Resp <- s.count
+	cmd.Resp <- s.totalCount
 	cmd.Resp <- s.totalLatency.Microseconds()
 }
