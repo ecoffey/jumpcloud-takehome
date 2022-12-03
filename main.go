@@ -14,21 +14,23 @@ import (
 	"time"
 )
 
-type ReserveIdCmd struct {
+type HashCmdReserveId struct {
 	plaintext string
 	hashDelay time.Duration
 	resp      chan int
 }
 
-type StoreHashCmd struct {
+type HashCmdStore struct {
 	id   int
 	hash string
 }
 
-type RetrieveHashCmd struct {
+type HashCmdRetrieve struct {
 	id   int
 	resp chan string
 }
+
+type HashCmdGracefulShutdown struct{}
 
 type RecordRequestCmd struct {
 	latency time.Duration
@@ -60,39 +62,61 @@ func hashEncode(plaintext string) string {
 	return base64.StdEncoding.EncodeToString(hasher.Sum(nil))
 }
 
-func startHashLoop() chan<- interface{} {
+func startHashLoop(shutdown chan int) chan<- interface{} {
 	hashStore := HashesStore{
 		id:       1,
 		idToHash: make(map[int]string),
 	}
 
-	cmds := make(chan interface{})
+	acceptingNewHashes := true
+	inFlight := 0
+
+	cmds := make(chan interface{}, 100)
 
 	go func() {
 		for cmd := range cmds {
 			switch cmd.(type) {
-			case ReserveIdCmd:
-				reservedIdCmd := cmd.(ReserveIdCmd)
-				id := hashStore.id
-				reservedIdCmd.resp <- id
-				hashStore.id += 1
-				if reservedIdCmd.hashDelay > 0 {
-					go func() {
-						<-time.Tick(reservedIdCmd.hashDelay)
-						hash := hashEncode(reservedIdCmd.plaintext)
-						cmds <- StoreHashCmd{id: id, hash: hash}
-					}()
+			case HashCmdReserveId:
+				if acceptingNewHashes {
+					reserveIdCmd := cmd.(HashCmdReserveId)
+					id := hashStore.id
+					reserveIdCmd.resp <- id
+					hashStore.id += 1
+					inFlight++
+					if reserveIdCmd.hashDelay > 0 {
+						go func() {
+							<-time.Tick(reserveIdCmd.hashDelay)
+							hash := hashEncode(reserveIdCmd.plaintext)
+							cmds <- HashCmdStore{id: id, hash: hash}
+						}()
+					} else {
+						hash := hashEncode(reserveIdCmd.plaintext)
+						hashStore.idToHash[id] = hash
+						inFlight--
+						if !acceptingNewHashes && inFlight == 0 {
+							// signal on shutdown channel
+							shutdown <- 1
+						}
+					}
 				} else {
-					hash := hashEncode(reservedIdCmd.plaintext)
-					hashStore.idToHash[id] = hash
+					cmd.(HashCmdReserveId).resp <- -1
 				}
-			case StoreHashCmd:
-				addHashCmd := cmd.(StoreHashCmd)
+			case HashCmdStore:
+				addHashCmd := cmd.(HashCmdStore)
 				hashStore.idToHash[addHashCmd.id] = addHashCmd.hash
-			case RetrieveHashCmd:
-				retrieveHashCmd := cmd.(RetrieveHashCmd)
+				inFlight--
+				if !acceptingNewHashes && inFlight == 0 {
+					// signal on shutdown channel
+					shutdown <- 1
+				}
+			case HashCmdRetrieve:
+				retrieveHashCmd := cmd.(HashCmdRetrieve)
 				retrieveHashCmd.resp <- hashStore.idToHash[retrieveHashCmd.id]
-
+			case HashCmdGracefulShutdown:
+				acceptingNewHashes = false
+				if inFlight == 0 {
+					shutdown <- 1
+				}
 			default:
 				log.Fatalln("unknown command type")
 			}
@@ -108,7 +132,7 @@ func startStatsLoop() chan<- interface{} {
 		totalLatency: 0,
 	}
 
-	cmds := make(chan interface{})
+	cmds := make(chan interface{}, 100)
 
 	go func() {
 		for cmd := range cmds {
@@ -138,7 +162,7 @@ func (s *Server) hashEndpoint(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp := make(chan int)
-		s.hashCmds <- ReserveIdCmd{
+		s.hashCmds <- HashCmdReserveId{
 			plaintext: r.Form.Get("password"),
 			hashDelay: s.hashDelay,
 			resp:      resp,
@@ -154,7 +178,7 @@ func (s *Server) hashEndpoint(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp := make(chan string)
-		s.hashCmds <- RetrieveHashCmd{id: id, resp: resp}
+		s.hashCmds <- HashCmdRetrieve{id: id, resp: resp}
 		hash := <-resp
 		fmt.Fprintf(w, "%s", hash)
 	} else {
@@ -181,16 +205,11 @@ func (s *Server) statsEndpoint(w http.ResponseWriter, r *http.Request) {
 	totalRequests := <-resp
 	totalLatency := <-resp
 
-	var jsonStruct StatsJson
+	var jsonStruct = StatsJson{}
 	if totalRequests > 0 {
 		jsonStruct = StatsJson{
 			Total:   totalRequests,
 			Average: totalLatency / totalRequests,
-		}
-	} else {
-		jsonStruct = StatsJson{
-			Total:   0,
-			Average: 0,
 		}
 	}
 
@@ -203,9 +222,13 @@ func (s *Server) statsEndpoint(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, string(jsonBytes))
 }
 
-func router(hashDelay time.Duration) http.Handler {
+func (s *Server) shutdownEndpoint(w http.ResponseWriter, r *http.Request) {
+	s.hashCmds <- HashCmdGracefulShutdown{}
+}
+
+func router(shutdown chan int, hashDelay time.Duration) http.Handler {
 	server := Server{
-		hashCmds:  startHashLoop(),
+		hashCmds:  startHashLoop(shutdown),
 		statsCmds: startStatsLoop(),
 		hashDelay: hashDelay,
 	}
@@ -215,12 +238,24 @@ func router(hashDelay time.Duration) http.Handler {
 	mux.HandleFunc("/hash", server.hashEndpoint)
 	mux.HandleFunc("/hash/", server.hashEndpoint)
 	mux.HandleFunc("/stats", server.statsEndpoint)
+	mux.HandleFunc("/shutdown", server.shutdownEndpoint)
 
 	return mux
 }
 
 func main() {
-	err := http.ListenAndServe(":3333", router(5*time.Second))
+	println("starting")
+	shutdown := make(chan int)
+	httpServer := http.Server{Addr: ":3333", Handler: router(shutdown, 5*time.Second)}
+
+	go func() {
+		println("waiting for shutdown signal...")
+		<-shutdown
+		println("got signal calling close!")
+		httpServer.Close()
+	}()
+
+	err := httpServer.ListenAndServe()
 
 	if errors.Is(err, http.ErrServerClosed) {
 		fmt.Printf("server closed\n")
@@ -228,4 +263,5 @@ func main() {
 		fmt.Printf("error starting server: %s\n", err)
 		os.Exit(1)
 	}
+
 }

@@ -33,13 +33,13 @@ func assertAddHashReturnsId(t *testing.T, server *Server, expectedId int) {
 
 func TestHashEndpoint(t *testing.T) {
 	t.Run("first id returned should be 1", func(t *testing.T) {
-		server := Server{hashCmds: startHashLoop()}
+		server := Server{hashCmds: startHashLoop(make(chan int))}
 
 		assertAddHashReturnsId(t, &server, 1)
 	})
 
 	t.Run("serial calls should return increasing ids", func(t *testing.T) {
-		server := Server{hashCmds: startHashLoop()}
+		server := Server{hashCmds: startHashLoop(make(chan int))}
 
 		assertAddHashReturnsId(t, &server, 1)
 		assertAddHashReturnsId(t, &server, 2)
@@ -48,7 +48,7 @@ func TestHashEndpoint(t *testing.T) {
 	})
 
 	t.Run("hashing roundtrip", func(t *testing.T) {
-		httpServer := httptest.NewServer(router(0))
+		httpServer := httptest.NewServer(router(make(chan int), 0))
 		defer httpServer.Close()
 
 		postResp, err := http.PostForm(httpServer.URL+"/hash", map[string][]string{"password": {"angryMonkey"}})
@@ -88,7 +88,7 @@ func TestHashEndpoint(t *testing.T) {
 	})
 
 	t.Run("stats return 0 if no requests", func(t *testing.T) {
-		httpServer := httptest.NewServer(router(0))
+		httpServer := httptest.NewServer(router(make(chan int), 0))
 		defer httpServer.Close()
 
 		getResp, err := http.Get(httpServer.URL + "/stats")
@@ -111,5 +111,15 @@ func TestHashEndpoint(t *testing.T) {
 		if statsJson.Total != 0 || statsJson.Average != 0 {
 			t.Errorf("Stats should have been 0")
 		}
+	})
+
+	t.Run("graceful shutdown", func(t *testing.T) {
+		shutdown := make(chan int)
+		httpServer := httptest.NewServer(router(shutdown, 0))
+
+		http.Get(httpServer.URL + "/shutdown")
+
+		<-shutdown
+		httpServer.Close()
 	})
 }
