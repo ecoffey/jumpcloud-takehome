@@ -13,28 +13,7 @@ import (
 	"testing"
 )
 
-func assertAddHashReturnsId(t *testing.T, app *app.App, expectedId int) {
-	request := httptest.NewRequest(http.MethodPost, "/hash", nil)
-	responseRecorder := httptest.NewRecorder()
-
-	app.PostHashEndpoint(responseRecorder, request)
-
-	if responseRecorder.Code != 200 {
-		t.Errorf("Did not return 200 OK")
-	}
-
-	bodyString := responseRecorder.Body.String()
-
-	id, err := strconv.Atoi(strings.TrimSpace(bodyString))
-	if err != nil {
-		t.Errorf("Could not parse response body to currentId: %s", err)
-	}
-	if id != expectedId {
-		t.Errorf("Did not return %d", expectedId)
-	}
-}
-
-func TestHashEndpoint(t *testing.T) {
+func TestEndpoints(t *testing.T) {
 	t.Run("first currentId returned should be 1", func(t *testing.T) {
 		a := app.App{HashCmds: hashes.StartHashLoop(make(chan int), 0)}
 
@@ -54,62 +33,28 @@ func TestHashEndpoint(t *testing.T) {
 		httpServer := httptest.NewServer(app.Router(make(chan int), 0))
 		defer httpServer.Close()
 
-		postResp, err := http.PostForm(httpServer.URL+"/hash", map[string][]string{"password": {"angryMonkey"}})
-		if err != nil {
-			t.Errorf("Unable to post to /hash: %s", err)
-		}
-		defer postResp.Body.Close()
+		id := parseBodyAsInt(t, "first hash", func() (*http.Response, error) {
+			return http.PostForm(httpServer.URL+"/hash", map[string][]string{"password": {"angryMonkey"}})
+		})
 
-		postBodyBytes, err := io.ReadAll(postResp.Body)
-		if err != nil {
-			t.Errorf("Could not read from postResp body %s", err)
-		}
-		postBodyStr := string(postBodyBytes)
+		assert(t, "id", 1, id)
 
-		id, err := strconv.Atoi(strings.TrimSpace(postBodyStr))
-		if err != nil {
-			t.Errorf("Could not parse postResp body to currentId: %s", err)
-		}
-		if id != 1 {
-			t.Errorf("Did not return %d", 1)
-		}
+		hash := parseBodyAsStr(t, "get hash", func() (*http.Response, error) {
+			return http.Get(httpServer.URL + "/hash/1")
+		})
 
-		getResp, err := http.Get(httpServer.URL + "/hash/1")
-		if err != nil {
-			t.Errorf("Unable to GET /hash/1 %s", err)
-		}
-
-		getBodyBytes, err := io.ReadAll(getResp.Body)
-		if err != nil {
-			t.Errorf("Could not read from getResp body %s", err)
-		}
-		getBodyStr := strings.TrimSpace(string(getBodyBytes))
-
-		if getBodyStr != "ZEHhWB65gUlzdVwtDQArEyx+KVLzp/aTaRaPlBzYRIFj6vjFdqEb0Q5B8zVKCZ0vKbZPZklJz0Fd7su2A+gf7Q==" {
-			t.Errorf("Did not return expected body, got %s", getBodyStr)
-		}
+		expectedHash := "ZEHhWB65gUlzdVwtDQArEyx+KVLzp/aTaRaPlBzYRIFj6vjFdqEb0Q5B8zVKCZ0vKbZPZklJz0Fd7su2A+gf7Q=="
+		assert(t, "hash", expectedHash, hash)
 	})
 
 	t.Run("stats return 0 if no requests", func(t *testing.T) {
 		httpServer := httptest.NewServer(app.Router(make(chan int), 0))
 		defer httpServer.Close()
 
-		getResp, err := http.Get(httpServer.URL + "/stats")
-		if err != nil {
-			t.Errorf("Unable to make GET call %s", err)
-		}
-		defer getResp.Body.Close()
-
-		getBodyBytes, err := io.ReadAll(getResp.Body)
-		if err != nil {
-			t.Errorf("Unable to read from getResp body %s", err)
-		}
-
 		var statsJson stats.StatsJson
-		err = json.Unmarshal(getBodyBytes, &statsJson)
-		if err != nil {
-			t.Errorf("Unable to unmarshal into StatsJson %s", err)
-		}
+		parseBodyAsJson(t, "get stats", &statsJson, func() (*http.Response, error) {
+			return http.Get(httpServer.URL + "/stats")
+		})
 
 		if statsJson.Total != 0 || statsJson.Average != 0 {
 			t.Errorf("Stats should have been 0")
@@ -126,29 +71,17 @@ func TestHashEndpoint(t *testing.T) {
 		}
 		defer postResp.Body.Close()
 
-		getResp, err := http.Get(httpServer.URL + "/stats")
-		if err != nil {
-			t.Errorf("Unable to make GET call %s", err)
-		}
-		defer getResp.Body.Close()
-
-		getBodyBytes, err := io.ReadAll(getResp.Body)
-		if err != nil {
-			t.Errorf("Unable to read from getResp body %s", err)
-		}
-
 		var statsJson stats.StatsJson
-		err = json.Unmarshal(getBodyBytes, &statsJson)
-		if err != nil {
-			t.Errorf("Unable to unmarshal into StatsJson %s", err)
-		}
+		parseBodyAsJson(t, "get stats", &statsJson, func() (*http.Response, error) {
+			return http.Get(httpServer.URL + "/stats")
+		})
 
 		if statsJson.Total == 0 || statsJson.Average == 0 {
-			t.Errorf("Stats should have been 0")
+			t.Errorf("Stats should have been not 0")
 		}
 	})
 
-	t.Run("graceful shutdown", func(t *testing.T) {
+	t.Run("graceful shutdown with no in-flight", func(t *testing.T) {
 		shutdown := make(chan int)
 		httpServer := httptest.NewServer(app.Router(shutdown, 0))
 
@@ -157,4 +90,84 @@ func TestHashEndpoint(t *testing.T) {
 		<-shutdown
 		httpServer.Close()
 	})
+}
+
+func assert(t *testing.T, context string, expected any, actual any) {
+	if actual != expected {
+		t.Errorf("[%s]: expected %s, but got actual %s", context, expected, actual)
+	}
+}
+
+func parseRecorderBodyAsInt(t *testing.T, context string, recorder *httptest.ResponseRecorder) int {
+	bodyString := recorder.Body.String()
+	id, err := strconv.Atoi(strings.TrimSpace(bodyString))
+	if err != nil {
+		t.Errorf("[%s] could not parse body %s as int: %s", context, bodyString, err)
+	}
+	return id
+}
+
+func parseBodyAsInt(t *testing.T, context string, f func() (*http.Response, error)) int {
+	resp, err := f()
+	if err != nil {
+		t.Errorf("[%s] response returned err %s", context, err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Errorf("[%s] could not parse body %s", context, err)
+	}
+
+	bodyStr := string(bodyBytes)
+
+	id, err := strconv.Atoi(strings.TrimSpace(bodyStr))
+	if err != nil {
+		t.Errorf("[%s] could not parse body %s as int: %s", context, bodyStr, err)
+	}
+
+	return id
+}
+
+func parseBodyAsStr(t *testing.T, context string, f func() (*http.Response, error)) string {
+	resp, err := f()
+	if err != nil {
+		t.Errorf("[%s] response returned err %s", context, err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Errorf("[%s] could not parse body %s", context, err)
+	}
+
+	return string(bodyBytes)
+}
+
+func parseBodyAsJson(t *testing.T, context string, v any, f func() (*http.Response, error)) {
+	resp, err := f()
+	if err != nil {
+		t.Errorf("[%s] response returned err %s", context, err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Errorf("[%s] could not parse body %s", context, err)
+	}
+
+	err = json.Unmarshal(bodyBytes, v)
+}
+
+func assertAddHashReturnsId(t *testing.T, app *app.App, expectedId int) {
+	request := httptest.NewRequest(http.MethodPost, "/hash", nil)
+	responseRecorder := httptest.NewRecorder()
+
+	app.PostHashEndpoint(responseRecorder, request)
+
+	assert(t, "post statuscode", http.StatusCreated, responseRecorder.Code)
+
+	id := parseRecorderBodyAsInt(t, "post id", responseRecorder)
+
+	assert(t, "hash id", expectedId, id)
 }

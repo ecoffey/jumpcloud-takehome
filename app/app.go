@@ -24,8 +24,12 @@ func (a *App) PostHashEndpoint(w http.ResponseWriter, r *http.Request) {
 		Resp:      resp,
 	}
 	id := <-resp
-	// TODO if id < 0 then return nack or error status
-	fmt.Fprintf(w, "%d", id)
+	if id > 0 {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, "%d", id)
+	} else {
+		http.Error(w, "Server Closing", http.StatusBadRequest)
+	}
 }
 
 func (a *App) GetHashEndpoint(w http.ResponseWriter, r *http.Request) {
