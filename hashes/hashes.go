@@ -49,7 +49,7 @@ type hashStore struct {
 // if == 0, then the hash is stored immediately during the processing of
 // the HashCmdReserveId command. This is useful for testing, so that tests
 // do not have to specify time.Sleep() calls.
-func StartHashLoop(shutdown chan int, hashDelay time.Duration) chan<- interface{} {
+func StartHashLoop(shutdown chan int, hashDelay time.Duration) chan interface{} {
 
 	s := hashStore{
 		// specify a buffered channel, so that we can concurrently

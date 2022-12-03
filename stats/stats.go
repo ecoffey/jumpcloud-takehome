@@ -26,7 +26,7 @@ type statsStore struct {
 // StartStatsLoop builds and returns a channel of empty interface, where the
 // intention is to feed that channel StatCmd* types, and begins consuming from
 // it in a go routine.
-func StartStatsLoop() chan<- interface{} {
+func StartStatsLoop() chan interface{} {
 	s := statsStore{
 		count:        0,
 		totalLatency: 0,

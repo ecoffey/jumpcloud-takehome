@@ -1,6 +1,7 @@
 package main
 
 import (
+	"eoinisawesome.com/jumpcloud-takehome/app"
 	"errors"
 	"net/http"
 	"os"
@@ -12,7 +13,7 @@ func main() {
 	shutdown := make(chan int)
 	httpServer := http.Server{
 		Addr:    ":3333",
-		Handler: router(shutdown, 5*time.Second),
+		Handler: app.Router(shutdown, 5*time.Second),
 	}
 
 	go func() {

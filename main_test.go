@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"eoinisawesome.com/jumpcloud-takehome/app"
 	"eoinisawesome.com/jumpcloud-takehome/hashes"
 	"eoinisawesome.com/jumpcloud-takehome/stats"
 	"io"
@@ -12,11 +13,11 @@ import (
 	"testing"
 )
 
-func assertAddHashReturnsId(t *testing.T, server *App, expectedId int) {
+func assertAddHashReturnsId(t *testing.T, app *app.App, expectedId int) {
 	request := httptest.NewRequest(http.MethodPost, "/hash", nil)
 	responseRecorder := httptest.NewRecorder()
 
-	server.hashEndpoint(responseRecorder, request)
+	app.PostHashEndpoint(responseRecorder, request)
 
 	if responseRecorder.Code != 200 {
 		t.Errorf("Did not return 200 OK")
@@ -35,22 +36,22 @@ func assertAddHashReturnsId(t *testing.T, server *App, expectedId int) {
 
 func TestHashEndpoint(t *testing.T) {
 	t.Run("first currentId returned should be 1", func(t *testing.T) {
-		server := App{hashCmds: hashes.StartHashLoop(make(chan int), 0)}
+		a := app.App{HashCmds: hashes.StartHashLoop(make(chan int), 0)}
 
-		assertAddHashReturnsId(t, &server, 1)
+		assertAddHashReturnsId(t, &a, 1)
 	})
 
 	t.Run("serial calls should return increasing ids", func(t *testing.T) {
-		server := App{hashCmds: hashes.StartHashLoop(make(chan int), 0)}
+		a := app.App{HashCmds: hashes.StartHashLoop(make(chan int), 0)}
 
-		assertAddHashReturnsId(t, &server, 1)
-		assertAddHashReturnsId(t, &server, 2)
-		assertAddHashReturnsId(t, &server, 3)
-		assertAddHashReturnsId(t, &server, 4)
+		assertAddHashReturnsId(t, &a, 1)
+		assertAddHashReturnsId(t, &a, 2)
+		assertAddHashReturnsId(t, &a, 3)
+		assertAddHashReturnsId(t, &a, 4)
 	})
 
 	t.Run("hashing roundtrip", func(t *testing.T) {
-		httpServer := httptest.NewServer(router(make(chan int), 0))
+		httpServer := httptest.NewServer(app.Router(make(chan int), 0))
 		defer httpServer.Close()
 
 		postResp, err := http.PostForm(httpServer.URL+"/hash", map[string][]string{"password": {"angryMonkey"}})
@@ -90,7 +91,7 @@ func TestHashEndpoint(t *testing.T) {
 	})
 
 	t.Run("stats return 0 if no requests", func(t *testing.T) {
-		httpServer := httptest.NewServer(router(make(chan int), 0))
+		httpServer := httptest.NewServer(app.Router(make(chan int), 0))
 		defer httpServer.Close()
 
 		getResp, err := http.Get(httpServer.URL + "/stats")
@@ -115,11 +116,43 @@ func TestHashEndpoint(t *testing.T) {
 		}
 	})
 
+	t.Run("stats return non-zero after a POST", func(t *testing.T) {
+		httpServer := httptest.NewServer(app.Router(make(chan int), 0))
+		defer httpServer.Close()
+
+		postResp, err := http.PostForm(httpServer.URL+"/hash", map[string][]string{"password": {"angryMonkey"}})
+		if err != nil {
+			t.Errorf("Unable to post to /hash: %s", err)
+		}
+		defer postResp.Body.Close()
+
+		getResp, err := http.Get(httpServer.URL + "/stats")
+		if err != nil {
+			t.Errorf("Unable to make GET call %s", err)
+		}
+		defer getResp.Body.Close()
+
+		getBodyBytes, err := io.ReadAll(getResp.Body)
+		if err != nil {
+			t.Errorf("Unable to read from getResp body %s", err)
+		}
+
+		var statsJson stats.StatsJson
+		err = json.Unmarshal(getBodyBytes, &statsJson)
+		if err != nil {
+			t.Errorf("Unable to unmarshal into StatsJson %s", err)
+		}
+
+		if statsJson.Total == 0 || statsJson.Average == 0 {
+			t.Errorf("Stats should have been 0")
+		}
+	})
+
 	t.Run("graceful shutdown", func(t *testing.T) {
 		shutdown := make(chan int)
-		httpServer := httptest.NewServer(router(shutdown, 0))
+		httpServer := httptest.NewServer(app.Router(shutdown, 0))
 
-		http.Get(httpServer.URL + "/shutdown")
+		http.Post(httpServer.URL+"/shutdown", "", nil)
 
 		<-shutdown
 		httpServer.Close()
