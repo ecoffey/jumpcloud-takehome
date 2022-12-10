@@ -87,6 +87,18 @@ func TestEndpoints(t *testing.T) {
 		<-shutdown
 		httpServer.Close()
 	})
+
+	t.Run("GET for missing id returns 404", func(t *testing.T) {
+		httpServer := httptest.NewServer(app.AppRouter(make(chan int), 0))
+		defer httpServer.Close()
+
+		getResp, err := http.Get(httpServer.URL + "/hash/1")
+		if err != nil {
+			t.Errorf("Unable to GET /hash/1: %s", err)
+		}
+
+		assert(t, "status code", 404, getResp.StatusCode)
+	})
 }
 
 func assert(t *testing.T, context string, expected any, actual any) {

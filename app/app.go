@@ -89,11 +89,21 @@ func (a *App) getHashEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := make(chan string)
+	resp := make(chan interface{})
 	a.hashCmds <- hashes.HashCmdRetrieve{Id: id, Resp: resp}
-	hash := <-resp
 
-	writeBody(w, hash)
+	result := <-resp
+
+	switch result.(type) {
+	case hashes.HashRetrieveFound:
+		hash := result.(hashes.HashRetrieveFound).Hash
+		writeBody(w, hash)
+	case hashes.HashRetrieveNotFound:
+		http.Error(w, "Not Found", http.StatusNotFound)
+	default:
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+
 }
 
 func (a *App) getStatsEndpoint(w http.ResponseWriter, _ *http.Request) {

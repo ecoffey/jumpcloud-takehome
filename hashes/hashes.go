@@ -18,9 +18,15 @@ type hashCmdStore struct {
 	hash string // the hash to store
 }
 
+type HashRetrieveFound struct {
+	Hash string
+}
+
+type HashRetrieveNotFound struct{}
+
 type HashCmdRetrieve struct {
-	Id   int         // the Id to retrieve
-	Resp chan string // the channel to send the hash to
+	Id   int              // the Id to retrieve
+	Resp chan interface{} // the channel to send the hash to
 }
 
 type HashCmdGracefulShutdown struct{}
@@ -119,7 +125,11 @@ func (s *hashStore) processStoreCmd(cmd hashCmdStore) {
 }
 
 func (s *hashStore) processRetrieveCmd(cmd HashCmdRetrieve) {
-	cmd.Resp <- s.idToHash[cmd.Id]
+	if val, ok := s.idToHash[cmd.Id]; ok {
+		cmd.Resp <- HashRetrieveFound{Hash: val}
+	} else {
+		cmd.Resp <- HashRetrieveNotFound{}
+	}
 }
 
 func (s *hashStore) processGracefulShutdownCmd() {
