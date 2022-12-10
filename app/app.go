@@ -72,7 +72,7 @@ func (a *App) postHashEndpoint(w http.ResponseWriter, r *http.Request) {
 	id := <-resp
 	if id <= 0 {
 		log.Printf("rejected POST /hash because server is waiting to shutdown")
-		http.Error(w, "Server Closing", http.StatusBadRequest)
+		http.Error(w, "Server Closing", http.StatusServiceUnavailable)
 		return
 	}
 
